@@ -1,121 +1,76 @@
-// @ts-check
 /**
  * Cloudflare Workers entry point for github-readme-stats.
  *
- * Routes incoming requests to the appropriate Vercel-style handler from api/*.js
- * using the vercel-adapter bridge. Original api/*.js files are untouched so
- * the Vercel deployment continues to work as-is.
- *
- * Route table:
- *   GET /                → stats card  (api/index.js)
- *   GET /api             → stats card  (api/index.js)
- *   GET /api/top-langs   → top languages card
- *   GET /api/pin         → repo pin card
- *   GET /api/gist        → gist card
- *   GET /api/wakatime    → wakatime card
- *   GET /api/status/up   → uptime probe
- *
- * Secrets (set via `wrangler secret put`):
- *   PAT_1 … PAT_N  — GitHub personal access tokens (required, at least one)
- *
- * Optional vars (set in wrangler.toml [vars] or as secrets):
- *   CACHE_SECONDS, WHITELIST, GIST_WHITELIST, EXCLUDE_REPO
+ * Injects env vars before any module reads process.env,
+ * then routes to the appropriate API handler.
  */
 
 import { adaptVercelHandler } from "./vercel-adapter.js";
 
-// Lazy-import handlers to keep startup fast and allow process.env to be
-// populated before the retryer module counts available PAT_* tokens.
-// All api/*.js files use top-level `export default async (req, res) => {}`
+// Static imports — wrangler bundles these at build time
+import statsHandler from "../api/index.js";
+import topLangsHandler from "../api/top-langs.js";
+import pinHandler from "../api/pin.js";
+import gistHandler from "../api/gist.js";
+import wakatimeHandler from "../api/wakatime.js";
 
-/** @type {Map<string, (request: Request, env: object) => Promise<Response>>} */
-const handlerCache = new Map();
+const routes = {
+  "/": statsHandler,
+  "/api": statsHandler,
+  "/api/top-langs": topLangsHandler,
+  "/api/pin": pinHandler,
+  "/api/gist": gistHandler,
+  "/api/wakatime": wakatimeHandler,
+};
 
-/**
- * Returns a cached CF-adapted handler for the given api module path.
- *
- * @param {string} modulePath  Relative path to the api module (e.g. "../api/index.js")
- * @returns {Promise<(request: Request, env: object) => Promise<Response>>}
- */
-async function getHandler(modulePath) {
-  if (handlerCache.has(modulePath)) {
-    // @ts-ignore — map.get is always defined after has() check
-    return handlerCache.get(modulePath);
-  }
-  const mod = await import(modulePath);
-  const vercelHandler = mod.default;
-  const cfHandler = adaptVercelHandler(vercelHandler);
-  handlerCache.set(modulePath, cfHandler);
-  return cfHandler;
-}
-
-/**
- * Resolve the api module path for the given URL pathname.
- *
- * @param {string} pathname
- * @returns {string | null}  Module path relative to this file, or null for 404.
- */
-function resolveModulePath(pathname) {
-  // Normalise: strip trailing slash, lower-case
-  const path = pathname.replace(/\/+$/, "").toLowerCase();
-
-  if (path === "" || path === "/api") return "../api/index.js";
-  if (path === "/api/top-langs") return "../api/top-langs.js";
-  if (path === "/api/pin") return "../api/pin.js";
-  if (path === "/api/gist") return "../api/gist.js";
-  if (path === "/api/wakatime") return "../api/wakatime.js";
-  if (path === "/api/status/up") return "../api/status/up.js";
-  if (path === "/api/status/pat-info") return "../api/status/pat-info.js";
-
-  return null;
+// Pre-adapt all handlers
+const adaptedRoutes = {};
+for (const [path, handler] of Object.entries(routes)) {
+  adaptedRoutes[path] = adaptVercelHandler(handler);
 }
 
 export default {
-  /**
-   * CF Workers fetch handler.
-   *
-   * @param {Request} request
-   * @param {Record<string, string>} env  Bound secrets and vars from wrangler.toml
-   * @param {ExecutionContext} _ctx
-   * @returns {Promise<Response>}
-   */
-  async fetch(request, env, _ctx) {
-    const url = new URL(request.url);
-    const modulePath = resolveModulePath(url.pathname);
+  async fetch(request, env, ctx) {
+    // Inject secrets into process.env FIRST
+    // This ensures retryer.js PAT_* detection works
+    if (env) {
+      for (const [key, value] of Object.entries(env)) {
+        if (typeof value === "string") {
+          process.env[key] = value;
+        }
+      }
+    }
 
-    if (!modulePath) {
-      return new Response(
-        JSON.stringify({
-          error: "Not Found",
-          routes: [
-            "/api",
-            "/api/top-langs",
-            "/api/pin",
-            "/api/gist",
-            "/api/wakatime",
-            "/api/status/up",
-            "/api/status/pat-info",
-          ],
-        }),
-        {
-          status: 404,
-          headers: { "Content-Type": "application/json" },
-        },
-      );
+    const url = new URL(request.url);
+    const path = url.pathname.replace(/\/+$/, "").toLowerCase() || "/";
+
+    const handler = adaptedRoutes[path];
+    if (!handler) {
+      return new Response(JSON.stringify({
+        error: "Not Found",
+        routes: Object.keys(routes),
+      }), {
+        status: 404,
+        headers: { "Content-Type": "application/json" },
+      });
     }
 
     try {
-      const handler = await getHandler(modulePath);
-      return handler(request, env);
+      const resp = await handler(request, env);
+      const body = await resp.clone().text();
+      if (body.includes("Something went wrong")) {
+        console.error("[worker] PAT count:", Object.keys(process.env).filter(k => /PAT_\d/.test(k)).length);
+        console.error("[worker] PAT_1 exists:", !!process.env.PAT_1);
+        console.error("[worker] PAT_1 prefix:", process.env.PAT_1?.substring(0, 8));
+        console.error("[worker] SVG body:", body.substring(0, 500));
+      }
+      return resp;
     } catch (err) {
-      console.error("[worker] Failed to load or run handler:", err);
-      return new Response(
-        JSON.stringify({ error: "Internal Server Error" }),
-        {
-          status: 500,
-          headers: { "Content-Type": "application/json" },
-        },
-      );
+      console.error("[worker] Error:", err.message, err.stack);
+      return new Response(JSON.stringify({ error: err.message }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      });
     }
   },
 };

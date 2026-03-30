@@ -1,9 +1,11 @@
 name = "github-readme-stats"
 main = "worker/cf-worker-entry.js"
-compatibility_date = "2024-01-01"
+compatibility_date = "2024-09-23"
+compatibility_flags = ["nodejs_compat"]
 
-# Required for Node.js built-ins used by axios, dotenv, etc.
-node_compat = true
+# Alias axios to our fetch-based shim (CF Workers has no Node HTTP internals)
+[alias]
+"axios" = "./worker/axios-shim.js"
 
 [vars]
 # Optional: override cache duration (seconds) for all cards.
