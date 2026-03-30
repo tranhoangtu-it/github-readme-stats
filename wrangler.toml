@@ -1,0 +1,23 @@
+name = "github-readme-stats"
+main = "worker/cf-worker-entry.js"
+compatibility_date = "2024-01-01"
+
+# Required for Node.js built-ins used by axios, dotenv, etc.
+node_compat = true
+
+[vars]
+# Optional: override cache duration (seconds) for all cards.
+# CACHE_SECONDS = "1800"
+
+# Optional: restrict to specific GitHub usernames (comma-separated).
+# WHITELIST = "user1,user2"
+
+# Optional: restrict gist card to specific gist IDs (comma-separated).
+# GIST_WHITELIST = "gistid1,gistid2"
+
+# Optional: globally exclude repositories from language stats (comma-separated).
+# EXCLUDE_REPO = "repo1,repo2"
+
+# Secrets (never commit these — set via CLI):
+#   wrangler secret put PAT_1
+#   wrangler secret put PAT_2   (optional, for token rotation)
